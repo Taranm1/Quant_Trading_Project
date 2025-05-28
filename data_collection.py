@@ -4,13 +4,13 @@ import numpy as np
 from itertools import combinations
 from statsmodels.tsa.stattools import coint
 import statsmodels.api as sm
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 from imblearn.over_sampling import SMOTE
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+from collections import Counter
 
-# Step 1: Download data
+# Step 1: Download data for given tickers
 tickers = [
     "AAPL", "MSFT", "GOOG", "AMZN", "META",
     "NVDA", "ADBE", "INTC", "CSCO", "ORCL",
@@ -18,23 +18,27 @@ tickers = [
     "AVGO", "MU", "HPQ", "DELL", "ZM"
 ]
 
+print("Downloading price data...")
 data = yf.download(tickers, start='2018-01-01', end='2023-01-01')
 close_prices = data['Close'].dropna()
 log_prices = np.log(close_prices)
 
-# Step 2: Find cointegrated pairs
+# Step 2: Find cointegrated pairs (p-value < 0.1)
+print("Finding cointegrated pairs...")
 pairs = list(combinations(log_prices.columns, 2))
 cointegrated_pairs = []
 
 for stock1, stock2 in pairs:
-    _, pvalue, _ = coint(log_prices[stock1], log_prices[stock2])
+    score, pvalue, _ = coint(log_prices[stock1], log_prices[stock2])
     if pvalue < 0.1:
         cointegrated_pairs.append((stock1, stock2, pvalue))
 
 print(f"Found {len(cointegrated_pairs)} cointegrated pairs.")
 
-# Step 3: Feature engineering and labeling
+# Step 3: Feature engineering and labeling for each pair
 all_features = []
+
+print("Engineering features for each pair...")
 for stock1, stock2, _ in cointegrated_pairs:
     y = log_prices[stock1]
     X = sm.add_constant(log_prices[stock2])
@@ -63,7 +67,7 @@ for stock1, stock2, _ in cointegrated_pairs:
     df['zscore_velocity'] = df['zscore'] - df['zscore_1d']
     df['zscore_acceleration'] = df['zscore_velocity'] - df['zscore_velocity'].shift(1)
 
-    # Loosened label to increase positive samples
+    # Label: loosened to increase positives
     future_z = zscore.shift(-5)
     df['label'] = ((zscore.abs() > 0.8) & (future_z.abs() < 0.7)).astype(int)
 
@@ -71,46 +75,80 @@ for stock1, stock2, _ in cointegrated_pairs:
     df = df.dropna()
     all_features.append(df)
 
-# Step 4: Combine all features
+# Step 4: Combine all pairs data
 full_data = pd.concat(all_features)
+print(f"Total samples: {len(full_data)}")
 
 # Step 5: Prepare features and labels
 X = full_data.drop(columns=['label', 'pair'])
 y = full_data['label']
 
-# Step 6: Train/test split (no shuffle to preserve time series)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+# Parameters for expanding window training
+initial_train_ratio = 0.7
+test_ratio = 0.1
+step_ratio = 0.1
 
-# Step 7: Use SMOTE to balance classes
-sm = SMOTE(random_state=42)
-X_train_bal, y_train_bal = sm.fit_resample(X_train, y_train)
+n_samples = len(full_data)
+initial_train_size = int(n_samples * initial_train_ratio)
+test_size = int(n_samples * test_ratio)
+step_size = int(n_samples * step_ratio)
 
-# Step 8: Scale features
-scaler = StandardScaler()
-X_train_bal = scaler.fit_transform(X_train_bal)
-X_test_scaled = scaler.transform(X_test)
+print(f"Initial train size: {initial_train_size}, test size: {test_size}, step size: {step_size}")
 
-# Step 9: Train XGBoost classifier with tuned hyperparameters
-model = XGBClassifier(
-    max_depth=5,
-    learning_rate=0.05,
-    n_estimators=300,
-    min_child_weight=3,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    eval_metric='logloss',
-    random_state=42
-)
-model.fit(X_train_bal, y_train_bal)
+all_reports = []
 
-# Step 10: Predict on test set
-y_pred = model.predict(X_test_scaled)
-print("Classification report (default threshold 0.5):")
-print(classification_report(y_test, y_pred))
+for start in range(initial_train_size, n_samples - test_size + 1, step_size):
+    train_idx = range(0, start)
+    test_idx = range(start, start + test_size)
 
-# Optional Step 11: Try prediction threshold tuning
-y_probs = model.predict_proba(X_test_scaled)[:, 1]
-threshold = 0.3
-y_pred_thresh = (y_probs >= threshold).astype(int)
-print(f"Classification report (threshold = {threshold}):")
-print(classification_report(y_test, y_pred_thresh))
+    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+
+    # Check class distribution in training set before applying SMOTE
+    counter = Counter(y_train)
+    if len(counter) < 2:
+        print(f"Skipping SMOTE at train size {len(y_train)} due to single class: {counter}")
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        model = XGBClassifier(
+            max_depth=5,
+            learning_rate=0.05,
+            n_estimators=300,
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric='logloss',
+            use_label_encoder=False,
+            random_state=42
+        )
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
+    else:
+        print(f"Applying SMOTE at train size {len(y_train)}: {counter}")
+        sm = SMOTE(random_state=42)
+        X_train_bal, y_train_bal = sm.fit_resample(X_train, y_train)
+
+        scaler = StandardScaler()
+        X_train_bal = scaler.fit_transform(X_train_bal)
+        X_test_scaled = scaler.transform(X_test)
+
+        model = XGBClassifier(
+            max_depth=5,
+            learning_rate=0.05,
+            n_estimators=300,
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric='logloss',
+            random_state=42
+        )
+        model.fit(X_train_bal, y_train_bal)
+        y_pred = model.predict(X_test_scaled)
+
+    print(f"Classification report for test period starting at index {start}:")
+    print(classification_report(y_test, y_pred))
+    all_reports.append(classification_report(y_test, y_pred, output_dict=True))
+
+print("Done all splits.")
