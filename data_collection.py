@@ -1,19 +1,20 @@
 import yfinance as yf
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 from itertools import combinations
 from statsmodels.tsa.stattools import coint
 import statsmodels.api as sm
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
+from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 
-# Step 1: Download Data
+# Step 1: Download data
 tickers = [
-    "AAPL", "MSFT", "GOOG", "AMZN", "META", 
+    "AAPL", "MSFT", "GOOG", "AMZN", "META",
     "NVDA", "ADBE", "INTC", "CSCO", "ORCL",
-    "CRM", "IBM", "QCOM", "TXN", "AMD", 
+    "CRM", "IBM", "QCOM", "TXN", "AMD",
     "AVGO", "MU", "HPQ", "DELL", "ZM"
 ]
 
@@ -26,17 +27,15 @@ pairs = list(combinations(log_prices.columns, 2))
 cointegrated_pairs = []
 
 for stock1, stock2 in pairs:
-    score, pvalue, _ = coint(log_prices[stock1], log_prices[stock2])
-    if pvalue < 0.05:
+    _, pvalue, _ = coint(log_prices[stock1], log_prices[stock2])
+    if pvalue < 0.1:
         cointegrated_pairs.append((stock1, stock2, pvalue))
 
-cointegrated_pairs.sort(key=lambda x: x[2])
 print(f"Found {len(cointegrated_pairs)} cointegrated pairs.")
 
-# Step 3: Extract features and labels from all cointegrated pairs
+# Step 3: Feature engineering and labeling
 all_features = []
-
-for stock1, stock2, pvalue in cointegrated_pairs:
+for stock1, stock2, _ in cointegrated_pairs:
     y = log_prices[stock1]
     X = sm.add_constant(log_prices[stock2])
     model = sm.OLS(y, X).fit()
@@ -47,7 +46,6 @@ for stock1, stock2, pvalue in cointegrated_pairs:
     spread_std = spread.std()
     zscore = (spread - spread_mean) / spread_std
 
-    # Build signal features
     df = pd.DataFrame(index=spread.index)
     df['zscore'] = zscore
     df['zscore_1d'] = zscore.shift(1)
@@ -55,30 +53,64 @@ for stock1, stock2, pvalue in cointegrated_pairs:
     df['zscore_5d'] = zscore.shift(5)
     df['spread_std_5'] = spread.rolling(5).std()
     df['spread_mean_5'] = spread.rolling(5).mean()
-    
-    # Labels: mean reversion signal
-    future_zscore = zscore.shift(-7)
-    df['label'] = ((zscore.abs() > 1) & (future_zscore.abs() < 1)).astype(int)
-    
-    # Add pair info (optional, helpful for analysis)
-    df['pair'] = f"{stock1}_{stock2}"
-    
-    # Drop missing values
-    df = df.dropna()
+    df['zscore_change'] = zscore - zscore.shift(1)
+    df['spread_pct'] = spread / spread_mean
+    df['volatility'] = spread.rolling(10).std()
+    df['momentum'] = zscore.rolling(3).mean()
+    df['bollinger_upper'] = df['spread_mean_5'] + 2 * df['spread_std_5']
+    df['bollinger_lower'] = df['spread_mean_5'] - 2 * df['spread_std_5']
+    df['bollinger_width'] = df['bollinger_upper'] - df['bollinger_lower']
+    df['zscore_velocity'] = df['zscore'] - df['zscore_1d']
+    df['zscore_acceleration'] = df['zscore_velocity'] - df['zscore_velocity'].shift(1)
 
+    # Loosened label to increase positive samples
+    future_z = zscore.shift(-5)
+    df['label'] = ((zscore.abs() > 0.8) & (future_z.abs() < 0.7)).astype(int)
+
+    df['pair'] = f"{stock1}_{stock2}"
+    df = df.dropna()
     all_features.append(df)
 
-# Step 4: Combine features from all pairs
+# Step 4: Combine all features
 full_data = pd.concat(all_features)
 
-# Step 5: Split into train/test and train the model
+# Step 5: Prepare features and labels
 X = full_data.drop(columns=['label', 'pair'])
 y = full_data['label']
 
+# Step 6: Train/test split (no shuffle to preserve time series)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
-model.fit(X_train, y_train)
+# Step 7: Use SMOTE to balance classes
+sm = SMOTE(random_state=42)
+X_train_bal, y_train_bal = sm.fit_resample(X_train, y_train)
 
-y_pred = model.predict(X_test)
+# Step 8: Scale features
+scaler = StandardScaler()
+X_train_bal = scaler.fit_transform(X_train_bal)
+X_test_scaled = scaler.transform(X_test)
+
+# Step 9: Train XGBoost classifier with tuned hyperparameters
+model = XGBClassifier(
+    max_depth=5,
+    learning_rate=0.05,
+    n_estimators=300,
+    min_child_weight=3,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    eval_metric='logloss',
+    random_state=42
+)
+model.fit(X_train_bal, y_train_bal)
+
+# Step 10: Predict on test set
+y_pred = model.predict(X_test_scaled)
+print("Classification report (default threshold 0.5):")
 print(classification_report(y_test, y_pred))
+
+# Optional Step 11: Try prediction threshold tuning
+y_probs = model.predict_proba(X_test_scaled)[:, 1]
+threshold = 0.3
+y_pred_thresh = (y_probs >= threshold).astype(int)
+print(f"Classification report (threshold = {threshold}):")
+print(classification_report(y_test, y_pred_thresh))
