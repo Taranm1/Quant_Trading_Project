@@ -1,130 +1,130 @@
 import yfinance as yf
 import pandas as pd
+import matplotlib.pyplot as plt
 import numpy as np
+from itertools import combinations
 from statsmodels.tsa.stattools import coint
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
-from imblearn.over_sampling import SMOTE
+import statsmodels.api as sm
 
 tickers = [
-    "AAPL", "ADBE", "AMD", "AMZN", "AVGO", "CRM", "CSCO", "DELL",
-    "GOOG", "HPQ", "IBM", "INTC", "META", "MSFT", "MU", "NVDA",
-    "ORCL", "QCOM", "TXN", "ZM"
+    "AAPL", "MSFT", "GOOG", "AMZN", "META", 
+    "NVDA", "ADBE", "INTC", "CSCO", "ORCL",
+    "CRM", "IBM", "QCOM", "TXN", "AMD", 
+    "AVGO", "MU", "HPQ", "DELL", "ZM"
 ]
+data=yf.download(tickers, start='2018-01-01', end='2023-01-01')
 
-print("Downloading data for all tickers at once...")
-data = yf.download(tickers, start="2020-01-01", end="2024-12-31")
+# 3. Extract daily closing prices
+close_prices = data['Close']
 
-print(f"Columns in downloaded data:\n{data.columns}")
+# 4. Handle missing values (if any)
+close_prices = close_prices.dropna()
 
-# Function to get adjusted close prices or fallback
-def get_adj_close(df, tickers):
-    # If multi-level columns (multiple tickers)
-    if isinstance(df.columns, pd.MultiIndex):
-        if 'Adj Close' in df.columns.levels[0]:
-            print("Using 'Adj Close' from multi-index columns.")
-            return df['Adj Close']
-        elif 'Close' in df.columns.levels[0]:
-            print("Warning: 'Adj Close' not found, using 'Close' from multi-index columns.")
-            return df['Close']
-        else:
-            raise KeyError("No 'Adj Close' or 'Close' in multi-index columns.")
+# 5. Visualize the closing prices
+close_prices.plot(figsize=(12,6), title='Daily Close Prices')
+plt.xlabel("Date")
+plt.ylabel("Price (USD)")
+plt.grid(True)
+
+
+
+log_prices=np.log(close_prices)
+pairs=list(combinations(log_prices.columns, 2))
+
+
+
+cointegrated_pairs = []
+
+for stock1, stock2 in pairs:
+    score, pvalue, _ = coint(log_prices[stock1], log_prices[stock2])
+    print(f"Testing pair: {stock1} & {stock2} | p-value: {pvalue:.4f}")
+    if pvalue < 0.05:  # statistically significant
+        cointegrated_pairs.append((stock1, stock2, pvalue))
+
+print(f"Found {len(cointegrated_pairs)} cointegrated pairs.")
+
+
+# Sort by p-value (strongest cointegration first)
+cointegrated_pairs.sort(key=lambda x: x[2])
+
+# Print result
+for pair in cointegrated_pairs:
+    print(f"Pair: {pair[0]} & {pair[1]} | p-value: {pair[2]:.4f}")
+
+plt.show()
+
+for stock1, stock2, pvalue in cointegrated_pairs:
+    y = log_prices[stock1]                  # Series of log prices for stock1
+    X = sm.add_constant(log_prices[stock2])  # Series of log prices for stock2, with constant added
+
+    model = sm.OLS(y, X).fit()              # Run linear regression with y and X (actual price data)
+    hedge_ratio = model.params[1]           # slope is the hedge ratio
+
+    spread = y - hedge_ratio * log_prices[stock2]  # Calculate spread using actual price series
+
+    spread_mean = spread.mean()
+    spread_std = spread.std()
+    zscore = (spread - spread_mean) / spread_std
+
+entry_threshold = 2
+exit_threshold = 0.5
+
+# Initialize a DataFrame to store signals
+signals = pd.DataFrame(index=spread.index)
+signals['zscore'] = zscore
+
+# Long entry signal: spread z-score < -entry_threshold
+signals['long_entry'] = signals['zscore'] < -entry_threshold
+
+# Short entry signal: spread z-score > entry_threshold
+signals['short_entry'] = signals['zscore'] > entry_threshold
+
+# Exit signal: when z-score between -exit_threshold and +exit_threshold
+signals['exit'] = signals['zscore'].abs() < exit_threshold
+
+# Position tracking:
+# +1 for long, -1 for short, 0 for no position
+
+signals['position'] = 0
+
+for i in range(1, len(signals)):
+    if signals['long_entry'].iloc[i]:
+        signals.at[signals.index[i], 'position'] = 1
+    elif signals['short_entry'].iloc[i]:
+        signals.at[signals.index[i], 'position'] = -1
+    elif signals['exit'].iloc[i]:
+        signals.at[signals.index[i], 'position'] = 0
     else:
-        # Single ticker or single level columns
-        if 'Adj Close' in df.columns:
-            print("Using 'Adj Close' from columns.")
-            return df['Adj Close']
-        elif 'Close' in df.columns:
-            print("Warning: 'Adj Close' not found, using 'Close' from columns.")
-            return df['Close']
-        else:
-            # If nothing found, download individually per ticker
-            print("No 'Adj Close' or 'Close' found in single DataFrame, downloading individually.")
-            all_adj = []
-            for t in tickers:
-                print(f"Downloading data for {t} individually...")
-                single_df = yf.download(t, start="2020-01-01", end="2024-12-31")
-                if 'Adj Close' in single_df.columns:
-                    all_adj.append(single_df['Adj Close'].rename(t))
-                elif 'Close' in single_df.columns:
-                    print(f"Warning: {t} no 'Adj Close', using 'Close' instead.")
-                    all_adj.append(single_df['Close'].rename(t))
-                else:
-                    raise KeyError(f"No 'Adj Close' or 'Close' for ticker {t}.")
-            adj_close_df = pd.concat(all_adj, axis=1)
-            return adj_close_df
+        signals.at[signals.index[i], 'position'] = signals['position'].iloc[i-1]
 
-adj_close = get_adj_close(data, tickers)
 
-adj_close.dropna(inplace=True)
-print(f"Data shape after cleaning: {adj_close.shape}")
 
-print("Testing pairs for cointegration...")
-n = adj_close.shape[1]
-pvalue_matrix = np.ones((n, n))
-keys = adj_close.columns
-pairs = []
+features = pd.DataFrame(index=spread.index)
+features['zscore'] = zscore
+features['zscore_1d'] = zscore.shift(1)
+features['zscore_3d'] = zscore.shift(3)
+features['zscore_5d'] = zscore.shift(5)
+features['spread_std_5'] = spread.rolling(5).std()
+features['spread_mean_5'] = spread.rolling(5).mean()
+features = features.dropna()
 
-for i in range(n):
-    for j in range(i + 1, n):
-        S1 = adj_close[keys[i]]
-        S2 = adj_close[keys[j]]
-        result = coint(S1, S2)
-        pvalue = result[1]
-        pvalue_matrix[i, j] = pvalue
-        print(f"Testing pair: {keys[i]} & {keys[j]} | p-value: {pvalue:.4f}")
-        if pvalue < 0.1:  # 10% significance level
-            pairs.append((keys[i], keys[j]))
+# Reversion = z-score crossing back toward 0 from an extreme
+future_zscore = zscore.shift(-3)  # 3-day future z-score
+labels = (zscore.abs() > 2) & (future_zscore.abs() < 1)
+features['label'] = labels.astype(int)
 
-print(f"\nFound {len(pairs)} cointegrated pairs (p < 0.1).")
+from sklearn.model_selection import train_test_split
 
-def create_features_and_target(S1, S2, window=5, threshold=0.5):
-    spread = S1 - S2
-    spread_ma = spread.rolling(window).mean()
-    spread_std = spread.rolling(window).std()
-    zscore = (spread - spread_ma) / spread_std
+X = features.drop(columns=['label'])
+y = features['label']
 
-    df = pd.DataFrame({
-        'zscore': zscore,
-        'zscore_lag1': zscore.shift(1),
-        'zscore_lag2': zscore.shift(2),
-        'zscore_lag3': zscore.shift(3),
-    }).dropna()
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    df['target'] = (zscore.shift(-1) < -threshold).astype(int)
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
 
-    return df.drop('target', axis=1), df['target']
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
 
-for s1, s2 in pairs:
-    print(f"\n--- Processing pair: {s1} & {s2} ---")
-
-    X, y = create_features_and_target(adj_close[s1], adj_close[s2])
-
-    if y.nunique() < 2:
-        print(f"Only one class present in target for pair {s1} & {s2}. Skipping ML training.")
-        continue
-
-    if y.sum() == 0:
-        print(f"No positive labels for pair {s1} & {s2}, skipping ML training.")
-        continue
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
-
-    smote = SMOTE(random_state=42)
-    try:
-        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-    except ValueError as e:
-        print(f"SMOTE error for pair {s1} & {s2}: {e}. Skipping this pair.")
-        continue
-
-    model = LogisticRegression(max_iter=1000, random_state=42)
-    model.fit(X_train_res, y_train_res)
-
-    y_pred = model.predict(X_test)
-    print(f"Classification report for pair {s1} & {s2}:\n")
-    print(classification_report(y_test, y_pred))
-
-print("\nAll pairs processed.")
+print(classification_report(y_test, y_pred))
