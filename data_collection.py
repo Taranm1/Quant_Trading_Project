@@ -184,7 +184,8 @@ def backtest_pnl(df):
     pnl = 0
     trades = 0
     wins = 0
-    daily_pnl = pd.Series(0.0, index=df.index)
+    # Create daily_pnl as a pandas Series for proper plotting
+    daily_pnl = pd.Series(0, index=df.index)
 
     for i in range(len(df) - holding_period):
         if df['pred_signal'].iloc[i] == 1:
@@ -195,7 +196,7 @@ def backtest_pnl(df):
             profit -= 2 * transaction_cost
             pnl += profit
             exit_date = df.index[i + holding_period]
-            daily_pnl.loc[exit_date] += profit
+            daily_pnl.loc[exit_date] += profit  # Profit realized on exit date
             if profit > 0:
                 wins += 1
     return pnl, trades, wins, daily_pnl
@@ -212,10 +213,6 @@ if trades > 0:
 else:
     print("No trades executed.")
 
-print(f"Daily PnL sample values:\n{daily_pnl[daily_pnl != 0].head(10)}")
-
-import matplotlib.pyplot as plt
-
 # --- Plot 1: Spread Z-score with trade signals ---
 
 plt.figure(figsize=(14, 6))
@@ -230,23 +227,5 @@ plt.xlabel('Date')
 plt.ylabel('Z-score')
 plt.legend()
 plt.grid(True)
-plt.tight_layout()
-plt.show()   # Show first plot
+plt.show()
 
-plt.close()  # Close first figure explicitly
-
-# --- Plot 2: Cumulative PnL over time ---
-
-cumulative_pnl = daily_pnl.cumsum()
-
-plt.figure(figsize=(14, 6))
-plt.plot(cumulative_pnl.index, cumulative_pnl, label='Cumulative PnL', color='purple')
-plt.title('Cumulative PnL from Model Predictions (Test Window)')
-plt.xlabel('Date')
-plt.ylabel('Cumulative PnL (Z-score units)')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()   # Show second plot
-
-plt.close()  # Close second figure explicitly
