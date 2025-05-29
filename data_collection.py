@@ -9,6 +9,7 @@ from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier
 from collections import Counter
 from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
 
 # --- Step 1: Download & prepare data ---
 
@@ -21,8 +22,8 @@ tickers = [
 
 print("Downloading price data...")
 data = yf.download(tickers, start='2018-01-01', end='2023-01-01')['Close']
-data = data.dropna(how='all')  # drop days where all prices are missing
-data = data.ffill().bfill()  # forward/backward fill missing prices
+data = data.dropna(how='all')
+data = data.ffill().bfill()
 log_prices = np.log(data)
 
 # --- Step 2: Find cointegrated pairs ---
@@ -38,26 +39,19 @@ for stock1, stock2 in pairs:
 
 print(f"Found {len(cointegrated_pairs)} cointegrated pairs.")
 
-# --- Step 3 & 4: Hedge ratio, spread, feature engineering, and profit-based labeling ---
+# --- Step 3 & 4: Feature engineering and labeling ---
 
 all_features = []
 
 def compute_profit_label(spread_series, entry_index, exit_index, threshold=0):
-    """
-    Compute profit from a trade entered at entry_index and exited at exit_index.
-    Positive profit if spread moves toward mean (zero).
-    Returns 1 if profitable (profit > threshold), else 0.
-    """
     entry_spread = spread_series.iloc[entry_index]
     exit_spread = spread_series.iloc[exit_index]
-    # Assume you enter a mean-reversion trade: short if spread>0, long if spread<0
-    # Profit if spread moves closer to zero
     profit = abs(entry_spread) - abs(exit_spread)
     return int(profit > threshold)
 
 print("Engineering features and labeling by actual profit for each pair...")
 
-window_exit = 5  # days to hold trade and check profit
+window_exit = 5
 
 for stock1, stock2, _ in cointegrated_pairs:
     y = log_prices[stock1]
@@ -87,25 +81,20 @@ for stock1, stock2, _ in cointegrated_pairs:
     df['zscore_velocity'] = df['zscore'] - df['zscore_1d']
     df['zscore_acceleration'] = df['zscore_velocity'] - df['zscore_velocity'].shift(1)
 
-    # Label: 1 if entering trade at day t is profitable by day t+window_exit
     labels = []
     for i in range(len(df) - window_exit):
         z = df['zscore'].iloc[i]
-        # Only consider signals when spread is large enough to enter trade
         if abs(z) > 1.5:
             label = compute_profit_label(spread, i, i + window_exit, threshold=0)
         else:
             label = 0
         labels.append(label)
-    # Pad the last window_exit days with 0 (no label)
     labels.extend([0]*window_exit)
     df['label'] = labels
 
     df['pair'] = f"{stock1}_{stock2}"
     df = df.dropna()
     all_features.append(df)
-
-# --- Step 5: Combine data and prepare for ML training ---
 
 full_data = pd.concat(all_features)
 print(f"Total samples after feature engineering: {len(full_data)}")
@@ -156,8 +145,8 @@ for start in range(initial_train_size, n_samples - test_size + 1, step_size):
         y_pred = model.predict(X_test_scaled)
     else:
         print(f"Applying SMOTE at train size {len(y_train)}: {counter}")
-        sm = SMOTE(random_state=42)
-        X_train_bal, y_train_bal = sm.fit_resample(X_train, y_train)
+        smote = SMOTE(random_state=42)
+        X_train_bal, y_train_bal = smote.fit_resample(X_train, y_train)
 
         scaler = StandardScaler()
         X_train_bal = scaler.fit_transform(X_train_bal)
@@ -184,33 +173,35 @@ for start in range(initial_train_size, n_samples - test_size + 1, step_size):
 
 print("Running simple backtest on last test window...")
 
-# Using last trained model and last test set to backtest profits
-test_signals = y_pred  # model predicted labels
+test_signals = y_pred
 test_data = full_data.iloc[test_idx].copy()
 test_data['pred_signal'] = test_signals
 
-# Backtest params
-transaction_cost = 0.0005  # 5 bps per trade
+transaction_cost = 0.0005
 holding_period = window_exit
 
-# Function to compute PnL per trade signal in test data
 def backtest_pnl(df):
     pnl = 0
     trades = 0
     wins = 0
+    daily_pnl = pd.Series(0.0, index=df.index)
+
     for i in range(len(df) - holding_period):
         if df['pred_signal'].iloc[i] == 1:
             trades += 1
             spread_entry = df['zscore'].iloc[i]
             spread_exit = df['zscore'].iloc[i + holding_period]
-            profit = abs(spread_entry) - abs(spread_exit)  # profit if spread moves toward zero
-            profit -= 2 * transaction_cost  # entry + exit costs
+            profit = abs(spread_entry) - abs(spread_exit)
+            profit -= 2 * transaction_cost
             pnl += profit
+            exit_date = df.index[i + holding_period]
+            daily_pnl.loc[exit_date] += profit
             if profit > 0:
                 wins += 1
-    return pnl, trades, wins
+    return pnl, trades, wins, daily_pnl
 
-pnl, trades, wins = backtest_pnl(test_data)
+pnl, trades, wins, daily_pnl = backtest_pnl(test_data)
+
 print(f"Backtest results on last test set:")
 print(f"Trades executed: {trades}")
 print(f"Winning trades: {wins}")
@@ -221,4 +212,41 @@ if trades > 0:
 else:
     print("No trades executed.")
 
-print("All done.")
+print(f"Daily PnL sample values:\n{daily_pnl[daily_pnl != 0].head(10)}")
+
+import matplotlib.pyplot as plt
+
+# --- Plot 1: Spread Z-score with trade signals ---
+
+plt.figure(figsize=(14, 6))
+plt.plot(test_data.index, test_data['zscore'], label='Spread Z-score', color='blue')
+buy_signals = test_data[test_data['pred_signal'] == 1]
+plt.scatter(buy_signals.index, buy_signals['zscore'], color='red', marker='^', label='Trade Signal (Enter)')
+plt.axhline(0, color='black', linestyle='--')
+plt.axhline(1.5, color='green', linestyle='--', alpha=0.5)
+plt.axhline(-1.5, color='green', linestyle='--', alpha=0.5)
+plt.title('Spread Z-score with Trade Entry Signals (Test Window)')
+plt.xlabel('Date')
+plt.ylabel('Z-score')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()   # Show first plot
+
+plt.close()  # Close first figure explicitly
+
+# --- Plot 2: Cumulative PnL over time ---
+
+cumulative_pnl = daily_pnl.cumsum()
+
+plt.figure(figsize=(14, 6))
+plt.plot(cumulative_pnl.index, cumulative_pnl, label='Cumulative PnL', color='purple')
+plt.title('Cumulative PnL from Model Predictions (Test Window)')
+plt.xlabel('Date')
+plt.ylabel('Cumulative PnL (Z-score units)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()   # Show second plot
+
+plt.close()  # Close second figure explicitly
