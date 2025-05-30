@@ -49,38 +49,38 @@ Below is an example of a backtest trade with z-score thresholds and entry signal
 
 --------------------------------------------------------------------
 
-## 📚 Reflection & Learning
+## 📚 Reflection & Learning
 ### Overall Approach
 I first identify cointegrated stock pairs using the Engle-Granger method, which tests if the spread between two stock prices is stationary — a sign they move together long-term. For each pair, I estimate a hedge ratio with linear regression to build the spread.
 
 When the spread deviates strongly from its mean, I expect it to revert. By taking opposing positions (short overpriced stock, long underpriced stock), the strategy aims to profit from this mean reversion.
 
-### Data Collection
+### Data Collection
 I use Yahoo Finance API to download historical prices for a basket of stocks, handle missing data with forward and backward filling, and take natural logarithms of prices. Log prices help stabilize variance and improve linear modeling.
 
-#### Cointegration Testing
+### Cointergration testing
 Pairs are tested using the Engle-Granger cointegration test. Pairs with low p-values (under 0.1) are considered strongly cointegrated and selected for further modeling.
 
-### Feature Engineering & ML
+### Feature Engineering & ML
 From each pair’s spread, I engineer features like z-score, rolling volatility, momentum, and Bollinger Bands. Labels for profitable trades are generated based on spread movements after signals.
 
 An XGBoost classifier trained on these features predicts profitable trade opportunities. SMOTE is applied to handle class imbalance, improving model robustness.
 
 --------------------------------------------------------------------
 
-## Key Learnings
+## 📝 Key learnings
 - How to implement and interpret stationarity and cointegration tests
 - Importance of feature engineering in time-series financial data
 - Handling imbalanced datasets with SMOTE for better classification
 - Evaluating model performance via expanding-window backtesting
 
-## Challenges
+## Challenges
 - Managing noisy and non-stationary financial data
 - Risk of overfitting given limited positive trade signals
 - Data leakage(originally tested using features from one large combined dataset with all stocks, this leads to inaccuracy not all stock pairs behave the same, I now split the data for pairs of stocks and tested on those)
 - Labelling with only z scores and many false signals leading to losses(I changed this to label positive trades based on profit)
 
-## Future Improvements
+## Future Improvements
 - Implement rolling-window cointegration to adapt to changing relationships
 - Explore reinforcement learning or other approaches for trade timing
 - Increase dataset scope and incorporate transaction costs for realism
