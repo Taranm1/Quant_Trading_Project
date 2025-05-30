@@ -38,7 +38,7 @@ Key libraries used:
 - scikit-learn, xgboost, imbalanced-learn for ML modeling
 - matplotlib for plotting
 
-## 📊 Outputs
+## 📊 Outputs
 - Classification performance reports
 - Visualizations of spread and trading signals
 - Backtest stats: total PnL, number of trades, win rate (on the last testing set on real live unseen data this model achieved a trade win rate of 69.5% and capturing a total of 55.484 in z score movement)
